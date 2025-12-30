@@ -40,6 +40,10 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+
+    # ✅ مهم لـ Render static
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -88,8 +92,13 @@ USE_I18N = True
 USE_TZ = True
 
 # ======================
-# STATIC FILES
+# ✅ STATIC FILES (هذا اللي ناقص)
 # ======================
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# ✅ تحسين إدارة static على Render
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
