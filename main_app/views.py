@@ -27,3 +27,37 @@ class SubmitTrainingAPIView(APIView):
             }, status=status.HTTP_201_CREATED)
         else:
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+from django.http import JsonResponse
+from main_app.services.graph_upload_session import GraphUploadSessionClient
+import os
+
+
+def test_large_upload_view(request):
+    try:
+        file_path = "/opt/render/project/src/excel_files/test.xlsx"
+
+        if not os.path.exists(file_path):
+            return JsonResponse({
+                "error": "Test file not found",
+                "path": file_path
+            }, status=404)
+
+        client = GraphUploadSessionClient()
+
+        result = client.upload_large_file(
+            local_path=file_path,
+            remote_folder="__TEST__",
+            remote_filename="test.xlsx",
+        )
+
+        return JsonResponse({
+            "status": "success",
+            "webUrl": result.get("webUrl")
+        })
+
+    except Exception as e:
+        return JsonResponse({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
