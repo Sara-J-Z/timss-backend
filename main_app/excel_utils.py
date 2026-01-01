@@ -9,7 +9,7 @@ from main_app.services.graph_upload_session import GraphUploadSessionClient
 EXCEL_DIR = os.path.join(os.getcwd(), "excel_files")
 os.makedirs(EXCEL_DIR, exist_ok=True)
 
-# Lock لكل مدرسة لمنع تضارب حفظ/رفع نفس الملف إذا وصل إرسالين بسرعة
+# Lock per school to avoid concurrent local save/upload for same workbook
 _SCHOOL_LOCKS: dict[str, threading.Lock] = {}
 
 
@@ -21,15 +21,9 @@ def safe_name(name: str) -> str:
 
 
 def safe_sheet_name(name: str) -> str:
-    """
-    Excel worksheet rules:
-    - max length 31
-    - cannot contain: \ / ? * [ ]
-    - avoid leading/trailing quotes/spaces
-    """
     name = (name or "Sheet1").strip()
     name = re.sub(r"\s+", "_", name)          # spaces -> _
-    name = re.sub(r"[\\/*?:\[\]]", "-", name) # forbidden -> -
+    name = re.sub(r"[\\/*?:\[\]]", "-", name) # forbidden in excel -> -
     return name[:31] or "Sheet1"
 
 
@@ -40,13 +34,12 @@ def _get_lock_for_school(safe_school: str) -> threading.Lock:
 
 
 def save_to_excel(data: dict):
-    # 1) Values
     school_name = data.get("school_name", "UnknownSchool")
     subject_raw = data.get("subject", "UnknownSubject")
     subject = safe_sheet_name(subject_raw)
 
-    # 2) Safe naming for file/folder
     safe_school = safe_name(school_name)
+
     remote_folder = safe_school
     remote_filename = f"{safe_school}.xlsx"
     file_path = os.path.join(EXCEL_DIR, remote_filename)
@@ -54,7 +47,22 @@ def save_to_excel(data: dict):
     lock = _get_lock_for_school(safe_school)
 
     with lock:
-        # 3) Load or create workbook
+        client = GraphUploadSessionClient()
+
+        # ✅ IMPORTANT: After deploy, local file is gone.
+        # If local file missing, download the current OneDrive file first (so we don't overwrite history).
+        if not os.path.exists(file_path):
+            try:
+                downloaded = client.download_file(remote_folder, remote_filename, file_path)
+                if downloaded:
+                    print("[OneDrive] Downloaded existing workbook before updating.")
+                else:
+                    print("[OneDrive] Workbook not found on OneDrive yet. Will create a new one locally.")
+            except Exception as e:
+                print(f"[OneDrive Download Error] {e}")
+                # continue; we may create new workbook locally if download fails
+
+        # Load or create workbook
         if os.path.exists(file_path):
             wb = openpyxl.load_workbook(file_path)
         else:
@@ -62,7 +70,7 @@ def save_to_excel(data: dict):
             default_sheet = wb.active
             wb.remove(default_sheet)
 
-        # 4) Load or create worksheet
+        # Load or create sheet
         if subject in wb.sheetnames:
             ws = wb[subject]
         else:
@@ -80,14 +88,10 @@ def save_to_excel(data: dict):
             for col_num in range(1, ws.max_column + 1):
                 cell = ws.cell(row=1, column=col_num)
                 cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill(
-                    start_color="4F81BD",
-                    end_color="4F81BD",
-                    fill_type="solid"
-                )
+                cell.fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
                 cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # 5) Append row
+        # Append row
         row = [
             data.get("date"),
             data.get("time"),
@@ -100,7 +104,7 @@ def save_to_excel(data: dict):
         question_values = [ans.get("answer_value") for ans in data.get("answers", [])]
         ws.append(row + question_values)
 
-        # 6) Formatting (borders + zebra)
+        # Borders + zebra
         thin_border = Border(
             left=Side(style="thin"),
             right=Side(style="thin"),
@@ -118,58 +122,38 @@ def save_to_excel(data: dict):
                 cell.border = thin_border
                 cell.alignment = Alignment(horizontal="center", vertical="center")
                 if fill_color:
-                    cell.fill = PatternFill(
-                        start_color=fill_color,
-                        end_color=fill_color,
-                        fill_type="solid"
-                    )
+                    cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
 
-        # 7) Column widths
+        # Column widths
         for col in ws.columns:
             column_letter = col[0].column_letter
             ws.column_dimensions[column_letter].width = 25
 
-        # 8) Save once
+        # Save once
         wb.save(file_path)
 
-        # ✅ Ensure file is flushed to disk before upload
+        # Ensure file flushed to disk before upload
         try:
             with open(file_path, "rb") as f:
                 os.fsync(f.fileno())
         except Exception:
-            # إذا النظام ما يدعم fsync بهالطريقة، نتجاوز بدون كسر
             pass
 
-    #     # 9) Upload to OneDrive (chunked / replace)
-    #     try:
-    #         client = GraphUploadSessionClient()
-    #         client.upload_large_file(
-    #             local_path=file_path,
-    #             remote_folder=remote_folder,
-    #             remote_filename=remote_filename,
-    #             chunk_size_mb=10
-    #         )
-    #     except Exception as e:
-    #         print(f"[OneDrive Upload Error] {e}")
+        # Upload to OneDrive (replace)
+        try:
+            client.upload_large_file(
+                local_path=file_path,
+                remote_folder=remote_folder,
+                remote_filename=remote_filename,
+                chunk_size_mb=10,
+                max_retries=1
+            )
+        except Exception as e:
+            msg = str(e)
+            # If locked, skip upload to avoid 500/OOM; next submission after close will upload full file
+            if "423" in msg or "Locked" in msg:
+                print("[OneDrive Upload] Skipped (Locked). Will upload on next submission.")
+            else:
+                print(f"[OneDrive Upload Error] {e}")
 
-    # return file_path
-    
-        # 9) Upload to OneDrive (chunked / replace)
-    try:
-        client = GraphUploadSessionClient()
-        client.upload_large_file(
-            local_path=file_path,
-            remote_folder=remote_folder,
-            remote_filename=remote_filename,
-            chunk_size_mb=10,
-            max_retries=1  # مهم: لا نكرر داخل request
-        )
-    except Exception as e:
-        msg = str(e)
-
-        # إذا الملف مقفول، لا نفشل الطلب ولا نحاول كثير
-        if "423" in msg or "Locked" in msg:
-            print("[OneDrive Upload] Skipped (Locked). Will upload on next submission.")
-        else:
-            print(f"[OneDrive Upload Error] {e}")
-
+    return file_path

@@ -42,9 +42,28 @@ class GraphUploadSessionClient:
             self.get_app_token()
         return {"Authorization": f"Bearer {self._token}"}
 
+    # ✅ NEW: Download file from OneDrive/SharePoint
+    def download_file(self, remote_folder: str, remote_filename: str, local_path: str) -> bool:
+        """
+        Download existing file from OneDrive to local_path.
+        Returns True if downloaded, False if not found (404).
+        """
+        remote_path = f"{self.root_folder}/{remote_folder}/{remote_filename}"
+        url = f"{GRAPH_BASE}/users/{self.user_email}/drive/root:/{remote_path}:/content"
+
+        r = requests.get(url, headers=self._headers(), timeout=120)
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(r.content)
+        return True
+
     def create_upload_session(self, remote_path: str) -> str:
         """
-        Create an upload session for a file path. We force replace to update the same file.
+        Create an upload session for a file path. Force replace to update the same file.
         """
         url = f"{GRAPH_BASE}/users/{self.user_email}/drive/root:/{remote_path}:/createUploadSession"
         payload = {"item": {"@microsoft.graph.conflictBehavior": "replace"}}
@@ -64,22 +83,21 @@ class GraphUploadSessionClient:
         remote_folder: str,
         remote_filename: str,
         chunk_size_mb: int = 10,
-        max_retries: int = 5
+        max_retries: int = 1
     ) -> dict:
         """
         Chunked upload with retries for:
         - 423 Locked (file open / temporary lock)
         - 409 Conflict (session conflict / concurrent update)
         - 429/503 throttling
+        NOTE: In our current setup we keep max_retries low to avoid OOM on Render Free.
         """
         chunk_size = chunk_size_mb * 1024 * 1024
 
         remote_path = f"{self.root_folder}/{remote_folder}/{remote_filename}"
         total_size = os.path.getsize(local_path)
 
-        # Outer retry loop: recreate upload session if needed
         for attempt in range(1, max_retries + 1):
-            upload_url = None
             try:
                 upload_url = self.create_upload_session(remote_path)
 
@@ -108,7 +126,7 @@ class GraphUploadSessionClient:
                             start = end + 1
                             continue
 
-                        # Handle lock/throttle/conflict mid-upload
+                        # Transient errors
                         if r.status_code in (409, 423, 429, 503):
                             raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
 
@@ -119,37 +137,13 @@ class GraphUploadSessionClient:
             except requests.HTTPError as e:
                 status = getattr(e.response, "status_code", None)
 
-                # 423 Locked: file open or temporary lock
-                if status == 423:
-                    wait = min(2 ** attempt, 20)
-                    print(f"[OneDrive Upload] Locked (423). Retry {attempt}/{max_retries} after {wait}s")
+                # On free instances, do not loop too much
+                if status in (409, 423, 429, 503) and attempt < max_retries:
+                    wait = min(2 ** attempt, 10)
+                    print(f"[OneDrive Upload] Transient {status}. Retry {attempt}/{max_retries} after {wait}s")
                     time.sleep(wait)
                     continue
 
-                # 409 Conflict: concurrent update/session conflict
-                if status == 409:
-                    wait = min(2 ** attempt, 20)
-                    print(f"[OneDrive Upload] Conflict (409). Retry {attempt}/{max_retries} after {wait}s")
-                    time.sleep(wait)
-                    continue
-
-                # 429/503 throttling
-                if status in (429, 503):
-                    wait = min(2 ** attempt, 20)
-                    print(f"[OneDrive Upload] Throttled ({status}). Retry {attempt}/{max_retries} after {wait}s")
-                    time.sleep(wait)
-                    continue
-
-                # Other errors: stop
-                raise
-
-            except Exception:
-                # Other exceptions: if more retries, wait a bit
-                if attempt < max_retries:
-                    wait = min(2 ** attempt, 20)
-                    print(f"[OneDrive Upload] Error. Retry {attempt}/{max_retries} after {wait}s")
-                    time.sleep(wait)
-                    continue
                 raise
 
         raise RuntimeError("Upload failed after max retries.")
