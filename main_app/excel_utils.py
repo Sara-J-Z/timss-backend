@@ -140,16 +140,36 @@ def save_to_excel(data: dict):
             # إذا النظام ما يدعم fsync بهالطريقة، نتجاوز بدون كسر
             pass
 
+    #     # 9) Upload to OneDrive (chunked / replace)
+    #     try:
+    #         client = GraphUploadSessionClient()
+    #         client.upload_large_file(
+    #             local_path=file_path,
+    #             remote_folder=remote_folder,
+    #             remote_filename=remote_filename,
+    #             chunk_size_mb=10
+    #         )
+    #     except Exception as e:
+    #         print(f"[OneDrive Upload Error] {e}")
+
+    # return file_path
+    
         # 9) Upload to OneDrive (chunked / replace)
-        try:
-            client = GraphUploadSessionClient()
-            client.upload_large_file(
-                local_path=file_path,
-                remote_folder=remote_folder,
-                remote_filename=remote_filename,
-                chunk_size_mb=10
-            )
-        except Exception as e:
+    try:
+        client = GraphUploadSessionClient()
+        client.upload_large_file(
+            local_path=file_path,
+            remote_folder=remote_folder,
+            remote_filename=remote_filename,
+            chunk_size_mb=10,
+            max_retries=1  # مهم: لا نكرر داخل request
+        )
+    except Exception as e:
+        msg = str(e)
+
+        # إذا الملف مقفول، لا نفشل الطلب ولا نحاول كثير
+        if "423" in msg or "Locked" in msg:
+            print("[OneDrive Upload] Skipped (Locked). Will upload on next submission.")
+        else:
             print(f"[OneDrive Upload Error] {e}")
 
-    return file_path
