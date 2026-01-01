@@ -1,3 +1,5 @@
+from django.http import HttpResponse
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -65,3 +67,11 @@ class SubmitTrainingAPIView(APIView):
             "excel_saved": excel_saved,
             "excel_error": excel_error,
         }, status=status.HTTP_201_CREATED)
+
+
+def azure_callback(request):
+    """
+    Dummy endpoint for Azure App Registration.
+    This endpoint is NOT used in authentication flow.
+    """
+    return HttpResponse("Azure callback endpoint is configured.")
