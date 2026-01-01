@@ -1,87 +1,155 @@
 import os
+import re
+import threading
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
-from main_app.services.graph_excel_append import GraphExcelAppender, safe_name
+from main_app.services.graph_upload_session import GraphUploadSessionClient
 
 EXCEL_DIR = os.path.join(os.getcwd(), "excel_files")
 os.makedirs(EXCEL_DIR, exist_ok=True)
 
+# Lock لكل مدرسة لمنع تضارب حفظ/رفع نفس الملف إذا وصل إرسالين بسرعة
+_SCHOOL_LOCKS: dict[str, threading.Lock] = {}
+
+
+def safe_name(name: str) -> str:
+    bad = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+    for ch in bad:
+        name = name.replace(ch, '-')
+    return name.strip()[:120] or "UnknownSchool"
+
+
+def safe_sheet_name(name: str) -> str:
+    """
+    Excel worksheet rules:
+    - max length 31
+    - cannot contain: \ / ? * [ ]
+    - avoid leading/trailing quotes/spaces
+    """
+    name = (name or "Sheet1").strip()
+    name = re.sub(r"\s+", "_", name)          # spaces -> _
+    name = re.sub(r"[\\/*?:\[\]]", "-", name) # forbidden -> -
+    return name[:31] or "Sheet1"
+
+
+def _get_lock_for_school(safe_school: str) -> threading.Lock:
+    if safe_school not in _SCHOOL_LOCKS:
+        _SCHOOL_LOCKS[safe_school] = threading.Lock()
+    return _SCHOOL_LOCKS[safe_school]
+
 
 def save_to_excel(data: dict):
+    # 1) Values
     school_name = data.get("school_name", "UnknownSchool")
-    subject = data.get("subject", "UnknownSubject")
+    subject_raw = data.get("subject", "UnknownSubject")
+    subject = safe_sheet_name(subject_raw)
 
-    # headers ثابتة + أسئلة
-    headers = [
-        "date", "time", "student_name", "class_name", "teacher_name",
-        "school_operation_region", "auto_correct_score_points"
-    ]
-    question_headers = [ans.get("question_number") for ans in data.get("answers", [])]
-    all_headers = headers + question_headers
-
-    row_values = [
-        data.get("date"),
-        data.get("time"),
-        data.get("student_name"),
-        data.get("class_name"),
-        data.get("teacher_name"),
-        data.get("school_operation_region"),
-        data.get("auto_correct_score_points"),
-    ] + [ans.get("answer_value") for ans in data.get("answers", [])]
-
-    # (اختياري) حفظ محلي بسيط مثل قبل — إذا تبينه
+    # 2) Safe naming for file/folder
     safe_school = safe_name(school_name)
-    file_path = os.path.join(EXCEL_DIR, f"{safe_school}.xlsx")
+    remote_folder = safe_school
+    remote_filename = f"{safe_school}.xlsx"
+    file_path = os.path.join(EXCEL_DIR, remote_filename)
 
-    # حفظ محلي (نفس منطقك السابق — اختصرته)
-    if os.path.exists(file_path):
-        wb = openpyxl.load_workbook(file_path)
-    else:
-        wb = openpyxl.Workbook()
-        wb.remove(wb.active)
+    lock = _get_lock_for_school(safe_school)
 
-    if subject in wb.sheetnames:
-        ws = wb[subject]
-    else:
-        ws = wb.create_sheet(title=subject)
-        ws.append(all_headers)
+    with lock:
+        # 3) Load or create workbook
+        if os.path.exists(file_path):
+            wb = openpyxl.load_workbook(file_path)
+        else:
+            wb = openpyxl.Workbook()
+            default_sheet = wb.active
+            wb.remove(default_sheet)
 
-        for col_num, _ in enumerate(ws[1], 1):
-            cell = ws.cell(row=1, column=col_num)
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+        # 4) Load or create worksheet
+        if subject in wb.sheetnames:
+            ws = wb[subject]
+        else:
+            ws = wb.create_sheet(title=subject)
 
-    ws.append(row_values)
+            base_headers = [
+                "date", "time", "student_name", "class_name", "teacher_name",
+                "school_operation_region", "auto_correct_score_points"
+            ]
+            answers = data.get("answers", [])
+            question_headers = [ans.get("question_number") for ans in answers]
+            ws.append(base_headers + question_headers)
 
-    thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
-    )
-    for row_cells in ws.iter_rows():
-        for cell in row_cells:
-            cell.border = thin_border
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+            # Header styling
+            for col_num in range(1, ws.max_column + 1):
+                cell = ws.cell(row=1, column=col_num)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill(
+                    start_color="4F81BD",
+                    end_color="4F81BD",
+                    fill_type="solid"
+                )
+                cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    for col in ws.columns:
-        ws.column_dimensions[col[0].column_letter].width = 25
+        # 5) Append row
+        row = [
+            data.get("date"),
+            data.get("time"),
+            data.get("student_name"),
+            data.get("class_name"),
+            data.get("teacher_name"),
+            data.get("school_operation_region"),
+            data.get("auto_correct_score_points"),
+        ]
+        question_values = [ans.get("answer_value") for ans in data.get("answers", [])]
+        ws.append(row + question_values)
 
-    wb.save(file_path)
-
-    # ✅ هنا المهم: تحديث OneDrive "بالـ append" بدل replace
-    try:
-        appender = GraphExcelAppender()
-        appender.ensure_and_append(
-            school_name=school_name,
-            subject=subject,
-            headers=all_headers,
-            row_values=row_values
+        # 6) Formatting (borders + zebra)
+        thin_border = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
         )
-        print("[Graph Excel] appended row successfully")
-    except Exception as e:
-        print(f"[Graph Excel Error] {e}")
+
+        for idx, row_cells in enumerate(ws.iter_rows(), 1):
+            if idx != 1:
+                fill_color = "DCE6F1" if idx % 2 == 0 else "FFFFFF"
+            else:
+                fill_color = None
+
+            for cell in row_cells:
+                cell.border = thin_border
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                if fill_color:
+                    cell.fill = PatternFill(
+                        start_color=fill_color,
+                        end_color=fill_color,
+                        fill_type="solid"
+                    )
+
+        # 7) Column widths
+        for col in ws.columns:
+            column_letter = col[0].column_letter
+            ws.column_dimensions[column_letter].width = 25
+
+        # 8) Save once
+        wb.save(file_path)
+
+        # ✅ Ensure file is flushed to disk before upload
+        try:
+            with open(file_path, "rb") as f:
+                os.fsync(f.fileno())
+        except Exception:
+            # إذا النظام ما يدعم fsync بهالطريقة، نتجاوز بدون كسر
+            pass
+
+        # 9) Upload to OneDrive (chunked / replace)
+        try:
+            client = GraphUploadSessionClient()
+            client.upload_large_file(
+                local_path=file_path,
+                remote_folder=remote_folder,
+                remote_filename=remote_filename,
+                chunk_size_mb=10
+            )
+        except Exception as e:
+            print(f"[OneDrive Upload Error] {e}")
 
     return file_path
