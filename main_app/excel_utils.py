@@ -1,5 +1,7 @@
 import os
 import openpyxl
+import threading
+
 from main_app.services.graph_upload_session import GraphUploadSessionClient
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
@@ -87,18 +89,22 @@ def save_to_excel(data: dict):
         ws.column_dimensions[column_letter].width = 25
 
     # ✅ save once
-    wb.save(file_path)
+        wb.save(file_path)
 
-    # ✅ Upload to OneDrive automatically (chunked upload)
-    try:
-        client = GraphUploadSessionClient()
-        client.upload_large_file(
-            local_path=file_path,
-            remote_folder=remote_folder,
-            remote_filename=remote_filename,
-            chunk_size_mb=10
-        )
-    except Exception as e:
-        print(f"[OneDrive Upload Error] {e}")
+    # ✅ Upload in background so Storyline gets response immediately
+    def _upload():
+        try:
+            client = GraphUploadSessionClient()
+            client.upload_large_file(
+                local_path=file_path,
+                remote_folder=remote_folder,
+                remote_filename=remote_filename,
+                chunk_size_mb=10
+            )
+        except Exception as e:
+            print(f"[OneDrive Upload Error] {e}")
+
+    threading.Thread(target=_upload, daemon=True).start()
 
     return file_path
+
