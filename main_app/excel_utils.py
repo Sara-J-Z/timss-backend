@@ -1,16 +1,30 @@
 import os
 import openpyxl
+from main_app.services.graph_upload_session import GraphUploadSessionClient
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 EXCEL_DIR = os.path.join(os.getcwd(), "excel_files")
 os.makedirs(EXCEL_DIR, exist_ok=True)
 
+def safe_name(name: str) -> str:
+    bad = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+    for ch in bad:
+        name = name.replace(ch, '-')
+    return name.strip()[:120] or "UnknownSchool"
+
 def save_to_excel(data: dict):
+    # ✅ 1) get values first
     school_name = data.get("school_name", "UnknownSchool")
     subject = data.get("subject", "UnknownSubject")
-    
-    file_path = os.path.join(EXCEL_DIR, f"{school_name}.xlsx")
-    
+
+    # ✅ 2) safe school name for OneDrive folder/filename
+    safe_school = safe_name(school_name)
+    remote_folder = safe_school
+    remote_filename = f"{safe_school}.xlsx"
+
+    # (اختياري لكن أنصح به) استخدمي safe_school أيضًا محليًا لتجنب مشاكل أسماء الملفات
+    file_path = os.path.join(EXCEL_DIR, f"{safe_school}.xlsx")
+
     if os.path.exists(file_path):
         wb = openpyxl.load_workbook(file_path)
     else:
@@ -56,7 +70,6 @@ def save_to_excel(data: dict):
 
     # تطبيق الحدود والتنسيق وZebra Stripes
     for idx, row_cells in enumerate(ws.iter_rows(), 1):
-        # تلوين صفوف البيانات بالتناوب (بعد صف العنوان)
         if idx != 1:
             fill_color = "DCE6F1" if idx % 2 == 0 else "FFFFFF"
         else:
@@ -73,5 +86,19 @@ def save_to_excel(data: dict):
         column_letter = col[0].column_letter
         ws.column_dimensions[column_letter].width = 25
 
+    # ✅ save once
     wb.save(file_path)
+
+    # ✅ Upload to OneDrive automatically (chunked upload)
+    try:
+        client = GraphUploadSessionClient()
+        client.upload_large_file(
+            local_path=file_path,
+            remote_folder=remote_folder,
+            remote_filename=remote_filename,
+            chunk_size_mb=10
+        )
+    except Exception as e:
+        print(f"[OneDrive Upload Error] {e}")
+
     return file_path
