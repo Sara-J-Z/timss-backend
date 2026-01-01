@@ -1,29 +1,67 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+
 from .serializers import TrainingRecordSerializer
 from .excel_utils import save_to_excel
 
 
 class SubmitTrainingAPIView(APIView):
+    """
+    Resilient endpoint:
+    - Try to save in DB (if DB is available)
+    - Always try to update/upload Excel to OneDrive
+    - If DB is down, system still works using OneDrive as the source of truth
+    """
+
     def post(self, request, *args, **kwargs):
+        training_id = None
+        db_saved = False
+        db_error = None
+
+        # 1) Validate payload structure (serializer validation)
         serializer = TrainingRecordSerializer(data=request.data)
-
         if serializer.is_valid():
-            training = serializer.save()  # حفظ في PostgreSQL
-
+            # 2) Try saving to DB (may fail if DB is down)
             try:
-                save_to_excel(serializer.data)
+                training = serializer.save()
+                training_id = training.id
+                db_saved = True
             except Exception as e:
-                return Response({
-                    "id": training.id,
-                    "message": "Training record saved, but Excel upload failed",
-                    "error": str(e)
-                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                db_saved = False
+                db_error = str(e)
+        else:
+            # If invalid, we still attempt Excel save (optional but useful)
+            db_error = serializer.errors
 
+        # 3) Always attempt Excel + OneDrive update (source of truth)
+        excel_saved = False
+        excel_error = None
+        try:
+            save_to_excel(request.data)  # use raw payload, no DB dependency
+            excel_saved = True
+        except Exception as e:
+            excel_saved = False
+            excel_error = str(e)
+
+        # 4) Decide response status
+        # If Excel failed, that's the critical failure for your workflow
+        if not excel_saved:
             return Response({
-                "id": training.id,
-                "message": "Training record saved and uploaded successfully"
-            }, status=status.HTTP_201_CREATED)
+                "message": "Processed, but Excel/OneDrive failed",
+                "db_saved": db_saved,
+                "training_id": training_id,
+                "db_error": db_error,
+                "excel_saved": excel_saved,
+                "excel_error": excel_error,
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # If Excel succeeded, return success even if DB failed
+        return Response({
+            "message": "Processed successfully",
+            "db_saved": db_saved,
+            "training_id": training_id,
+            "db_error": db_error,
+            "excel_saved": excel_saved,
+            "excel_error": excel_error,
+        }, status=status.HTTP_201_CREATED)
