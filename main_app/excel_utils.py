@@ -21,9 +21,14 @@ def safe_name(name: str) -> str:
 
 
 def safe_sheet_name(name: str) -> str:
+    """
+    Excel sheet rules:
+    - max length 31
+    - cannot contain: \ / ? * [ ]
+    """
     name = (name or "Sheet1").strip()
     name = re.sub(r"\s+", "_", name)          # spaces -> _
-    name = re.sub(r"[\\/*?:\[\]]", "-", name) # forbidden in excel -> -
+    name = re.sub(r"[\\/*?:\[\]]", "-", name) # forbidden -> -
     return name[:31] or "Sheet1"
 
 
@@ -49,8 +54,8 @@ def save_to_excel(data: dict):
     with lock:
         client = GraphUploadSessionClient()
 
-        # ✅ IMPORTANT: After deploy, local file is gone.
-        # If local file missing, download the current OneDrive file first (so we don't overwrite history).
+        # ✅ After deploy or after cleanup, local file may not exist.
+        # Download the existing OneDrive workbook first to avoid overwriting history.
         if not os.path.exists(file_path):
             try:
                 downloaded = client.download_file(remote_folder, remote_filename, file_path)
@@ -60,7 +65,7 @@ def save_to_excel(data: dict):
                     print("[OneDrive] Workbook not found on OneDrive yet. Will create a new one locally.")
             except Exception as e:
                 print(f"[OneDrive Download Error] {e}")
-                # continue; we may create new workbook locally if download fails
+                # continue; we may create a new workbook locally if download fails
 
         # Load or create workbook
         if os.path.exists(file_path):
@@ -126,8 +131,7 @@ def save_to_excel(data: dict):
 
         # Column widths
         for col in ws.columns:
-            column_letter = col[0].column_letter
-            ws.column_dimensions[column_letter].width = 25
+            ws.column_dimensions[col[0].column_letter].width = 25
 
         # Save once
         wb.save(file_path)
@@ -148,12 +152,24 @@ def save_to_excel(data: dict):
                 chunk_size_mb=10,
                 max_retries=1
             )
+
+            print("[OneDrive Upload] Success. Cleaning local file...")
+
+            # ✅ Delete local file after successful upload
+            try:
+                os.remove(file_path)
+                print(f"[CLEANUP] Local file deleted: {file_path}")
+            except Exception as e:
+                print(f"[CLEANUP WARNING] Could not delete local file: {e}")
+
         except Exception as e:
             msg = str(e)
-            # If locked, skip upload to avoid 500/OOM; next submission after close will upload full file
+
+            # If locked, skip upload and keep local file for next attempt
             if "423" in msg or "Locked" in msg:
                 print("[OneDrive Upload] Skipped (Locked). Will upload on next submission.")
             else:
                 print(f"[OneDrive Upload Error] {e}")
 
+    # NOTE: file may be deleted if upload succeeded
     return file_path
