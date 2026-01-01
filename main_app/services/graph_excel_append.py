@@ -1,8 +1,10 @@
 import os
 import io
 import time
+import re
 import requests
 import openpyxl
+from urllib.parse import quote
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
@@ -12,6 +14,23 @@ def safe_name(name: str) -> str:
     for ch in bad:
         name = name.replace(ch, '-')
     return name.strip()[:120] or "UnknownSchool"
+
+
+def safe_table_name(name: str) -> str:
+    """
+    Excel table names:
+    - must start with a letter or underscore
+    - cannot contain spaces or most punctuation
+    - keep it reasonably short
+    """
+    name = name.strip()
+    name = re.sub(r"\s+", "_", name)
+    name = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    if not name:
+        name = "Sheet1"
+    if not (name[0].isalpha() or name[0] == "_"):
+        name = f"t_{name}"
+    return name[:50]
 
 
 class GraphExcelAppender:
@@ -46,6 +65,7 @@ class GraphExcelAppender:
     def _get_token(self) -> str:
         if self._token:
             return self._token
+
         token_url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
         data = {
             "client_id": self.client_id,
@@ -63,7 +83,6 @@ class GraphExcelAppender:
 
     # ---------- Drive helpers ----------
     def _get_item_by_path(self, path_in_drive: str) -> dict | None:
-        # GET /drive/root:/path
         url = f"{GRAPH_BASE}/users/{self.user_email}/drive/root:/{path_in_drive}"
         r = requests.get(url, headers=self._headers(), timeout=30)
         if r.status_code == 404:
@@ -72,14 +91,19 @@ class GraphExcelAppender:
         return r.json()
 
     def _create_folder(self, parent_path: str, folder_name: str):
-        # POST /drive/root:/parent_path:/children
+        # parent_path is like "" or "TIMSS" or "TIMSS/School"
         url = f"{GRAPH_BASE}/users/{self.user_email}/drive/root:/{parent_path}:/children"
         payload = {
             "name": folder_name,
             "folder": {},
             "@microsoft.graph.conflictBehavior": "fail",
         }
-        r = requests.post(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=30)
+        r = requests.post(
+            url,
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=30
+        )
         if r.status_code == 409:
             return  # already exists
         r.raise_for_status()
@@ -91,7 +115,6 @@ class GraphExcelAppender:
             return
 
         current = parts[0]
-        # ensure first folder under root
         if not self._get_item_by_path(current):
             self._create_folder("", current)
 
@@ -109,8 +132,6 @@ class GraphExcelAppender:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = subject
-
-        # Header row only (table will be created later)
         ws.append(headers)
 
         bio = io.BytesIO()
@@ -136,9 +157,12 @@ class GraphExcelAppender:
 
         url = f"{GRAPH_BASE}/users/{self.user_email}/drive/items/{item_id}/workbook/worksheets/add"
         payload = {"name": sheet_name}
-        r = requests.post(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=30)
-
-        # إذا كان موجود بالفعل (race) ممكن يرجع 409
+        r = requests.post(
+            url,
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=30
+        )
         if r.status_code == 409:
             return
         r.raise_for_status()
@@ -149,6 +173,14 @@ class GraphExcelAppender:
         r.raise_for_status()
         return r.json().get("value", [])
 
+    @staticmethod
+    def _num_to_excel_col(n: int) -> str:
+        result = ""
+        while n > 0:
+            n, rem = divmod(n - 1, 26)
+            result = chr(65 + rem) + result
+        return result
+
     def _ensure_table(self, item_id: str, sheet_name: str, table_name: str, columns_count: int) -> str:
         # If exists, return id
         tables = self._list_tables(item_id)
@@ -156,39 +188,47 @@ class GraphExcelAppender:
             if t.get("name") == table_name:
                 return t.get("id")
 
-        # Create table on the worksheet.
-        # We create it on range A1:<col>1 (headers row).
         last_col_letter = self._num_to_excel_col(columns_count)
-        address = f"{sheet_name}!A1:{last_col_letter}1"
 
-        url = f"{GRAPH_BASE}/users/{self.user_email}/drive/items/{item_id}/workbook/worksheets/{sheet_name}/tables/add"
-        payload = {
-            "address": address,
-            "hasHeaders": True
-        }
-        r = requests.post(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=30)
+        # ✅ Excel address MUST quote sheet name if it has spaces/special chars
+        safe_sheet_for_address = sheet_name.replace("'", "''")
+        address = f"'{safe_sheet_for_address}'!A1:{last_col_letter}1"
+
+        # ✅ Worksheet reference in URL must be worksheets('name') and URL-encoded
+        sheet_ref = quote(sheet_name)
+        url = f"{GRAPH_BASE}/users/{self.user_email}/drive/items/{item_id}/workbook/worksheets('{sheet_ref}')/tables/add"
+
+        payload = {"address": address, "hasHeaders": True}
+        r = requests.post(
+            url,
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=30
+        )
         r.raise_for_status()
+
         return r.json().get("id")
 
-    @staticmethod
-    def _num_to_excel_col(n: int) -> str:
-        # 1 -> A, 26 -> Z, 27 -> AA
-        result = ""
-        while n > 0:
-            n, rem = divmod(n - 1, 26)
-            result = chr(65 + rem) + result
-        return result
-
     def _append_row_to_table(self, item_id: str, table_id_or_name: str, values: list):
-        # POST /workbook/tables/{id|name}/rows/add
         url = f"{GRAPH_BASE}/users/{self.user_email}/drive/items/{item_id}/workbook/tables/{table_id_or_name}/rows/add"
         payload = {"values": [values]}
-        r = requests.post(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=30)
 
-        # Sometimes Excel APIs briefly return 409 when the workbook is busy; small retry helps.
+        r = requests.post(
+            url,
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=30
+        )
+
+        # retry on transient errors (workbook busy / throttling)
         if r.status_code in (409, 429, 503):
             time.sleep(1.5)
-            r = requests.post(url, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=30)
+            r = requests.post(
+                url,
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json=payload,
+                timeout=30
+            )
 
         r.raise_for_status()
         return r.json()
@@ -196,7 +236,7 @@ class GraphExcelAppender:
     # ---------- Public: Full automatic pipeline ----------
     def ensure_and_append(self, school_name: str, subject: str, headers: list[str], row_values: list):
         safe_school = safe_name(school_name)
-        safe_subject = subject.strip()[:120] or "Sheet1"
+        safe_subject = (subject or "Sheet1").strip()[:120] or "Sheet1"
 
         # 1) Ensure folders
         folder_path = f"{self.root_folder}/{safe_school}"
@@ -216,10 +256,15 @@ class GraphExcelAppender:
         self._ensure_worksheet(item_id, safe_subject)
 
         # 4) Ensure table exists (one per subject)
-        table_name = f"tbl_{safe_subject}"
+        table_name = safe_table_name(f"tbl_{safe_subject}")
         table_id = self._ensure_table(item_id, safe_subject, table_name, len(headers))
 
         # 5) Append row
         self._append_row_to_table(item_id, table_id, row_values)
 
-        return {"status": "ok", "workbook": workbook_path, "sheet": safe_subject, "table": table_name}
+        return {
+            "status": "ok",
+            "workbook": workbook_path,
+            "sheet": safe_subject,
+            "table": table_name
+        }
