@@ -21,7 +21,7 @@ def safe_name(name: str) -> str:
 
 
 def safe_sheet_name(name: str) -> str:
-    """
+    r"""
     Excel sheet rules:
     - max length 31
     - cannot contain: \ / ? * [ ]
