@@ -82,7 +82,7 @@ def save_to_excel(data: dict):
             ws = wb.create_sheet(title=subject)
 
             base_headers = [
-                "date", "time", "student_name", "class_name", "teacher_name",
+                "date", "time", "student_name", "gender", "grade", "user_role", "class_name", "teacher_name",
                 "school_operation_region", "auto_correct_score_points"
             ]
             answers = data.get("answers", [])
@@ -101,6 +101,9 @@ def save_to_excel(data: dict):
             data.get("date"),
             data.get("time"),
             data.get("student_name"),
+            data.get("gender"),
+            data.get("grade"),
+            data.get("user_role"),
             data.get("class_name"),
             data.get("teacher_name"),
             data.get("school_operation_region"),

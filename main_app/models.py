@@ -9,6 +9,9 @@ class TrainingRecord(models.Model):
     
     # بيانات الطالب والمدرسة
     student_name = models.CharField(max_length=200, default='Unknown')
+    gender = models.CharField(max_length=20, default="Unknown")      # NEW
+    grade = models.CharField(max_length=20, default="Unknown")       # NEW
+    user_role = models.CharField(max_length=20, default="Unknown") 
     school_operation_region = models.CharField(max_length=200, default='Unknown')
     school_name = models.CharField(max_length=200, default='Unknown')
     class_name = models.CharField(max_length=100, default='Unknown')

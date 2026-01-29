@@ -12,7 +12,7 @@ class TrainingRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = TrainingRecord
         fields = [
-            'date', 'time', 'subject', 'student_name', 
+            'date', 'time', 'subject', 'student_name', "gender", "grade", "user_role",
             'school_operation_region', 'school_name', 
             'class_name', 'teacher_name', 'auto_correct_score_points', 'answers'
         ]
