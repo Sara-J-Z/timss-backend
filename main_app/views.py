@@ -11,9 +11,10 @@ from .excel_utils import save_to_excel
 class SubmitTrainingAPIView(APIView):
     """
     Resilient endpoint:
-    - Try to save in DB (if DB is available)
-    - Always try to update/upload Excel to OneDrive
-    - If DB is down, system still works using OneDrive as the source of truth
+    - Validate payload first.
+    - Try to save in DB.
+    - Try to update/upload Excel to OneDrive only for a valid payload.
+    - If DB is down, Excel can still be attempted using validated data.
     """
 
     def post(self, request, *args, **kwargs):
@@ -21,33 +22,42 @@ class SubmitTrainingAPIView(APIView):
         db_saved = False
         db_error = None
 
-        # 1) Validate payload structure (serializer validation)
+        # 1) Validate payload structure BEFORE any DB/Excel write.
         serializer = TrainingRecordSerializer(data=request.data)
-        if serializer.is_valid():
-            # 2) Try saving to DB (may fail if DB is down)
-            try:
-                training = serializer.save()
-                training_id = training.id
-                db_saved = True
-            except Exception as e:
-                db_saved = False
-                db_error = str(e)
-        else:
-            # If invalid, we still attempt Excel save (optional but useful)
-            db_error = serializer.errors
+        if not serializer.is_valid():
+            return Response({
+                "message": "Invalid payload",
+                "db_saved": False,
+                "training_id": None,
+                "db_error": serializer.errors,
+                "excel_saved": False,
+                "excel_error": "Excel/OneDrive skipped because payload validation failed.",
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 3) Always attempt Excel + OneDrive update (source of truth)
+        # Make a plain validated payload for Excel/OneDrive.
+        validated_payload = dict(serializer.validated_data)
+        validated_payload["answers"] = [dict(a) for a in serializer.validated_data.get("answers", [])]
+
+        # 2) Try saving to DB.
+        try:
+            training = serializer.save()
+            training_id = training.id
+            db_saved = True
+        except Exception as e:
+            db_saved = False
+            db_error = str(e)
+
+        # 3) Attempt Excel + OneDrive update only with validated data.
         excel_saved = False
         excel_error = None
         try:
-            save_to_excel(request.data)  # use raw payload, no DB dependency
+            save_to_excel(validated_payload)
             excel_saved = True
         except Exception as e:
             excel_saved = False
             excel_error = str(e)
 
-        # 4) Decide response status
-        # If Excel failed, that's the critical failure for your workflow
+        # 4) Excel failure is reported explicitly; DB data remains available for recovery.
         if not excel_saved:
             return Response({
                 "message": "Processed, but Excel/OneDrive failed",
@@ -58,7 +68,6 @@ class SubmitTrainingAPIView(APIView):
                 "excel_error": excel_error,
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # If Excel succeeded, return success even if DB failed
         return Response({
             "message": "Processed successfully",
             "db_saved": db_saved,
